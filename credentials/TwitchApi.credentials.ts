@@ -48,7 +48,7 @@ export class TwitchApi implements ICredentialType {
 		type: 'generic',
 		properties: {
 			headers: {
-				Authorization: '={{$credentials.oauthToken}}',
+				Authorization: '=Bearer {{$credentials.oauthToken}}',
 			},
 		},
 	};
