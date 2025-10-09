@@ -34,7 +34,7 @@ export class TwitchChat implements INodeType {
 		outputs: [NodeConnectionTypes.Main],
 		credentials: [
 			{
-				name: 'twitchApi',
+				name: 'twitchTMIApi',
 				required: true,
 			},
 		],
@@ -109,7 +109,7 @@ export class TwitchChat implements INodeType {
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
-				const credentials = await this.getCredentials('twitchApi', itemIndex);
+				const credentials = await this.getCredentials('twitchTMIApi', itemIndex);
 				const channelName = this.getNodeParameter('channelName', itemIndex, '') as string;
 				const durationType = this.getNodeParameter('durationType', itemIndex) as string;
 				const duration = this.getNodeParameter('duration', itemIndex, 60000) as number;

@@ -6,8 +6,8 @@ import type {
 } from 'n8n-workflow';
 
 export class TwitchApi implements ICredentialType {
-	name = 'twitchApi';
-	displayName = 'Twitch API';
+	name = 'twitchTMIApi';
+	displayName = 'Twitch TMI API';
 	documentationUrl = 'https://dev.twitch.tv/docs/authentication';
 	properties: INodeProperties[] = [
 		{
@@ -39,7 +39,7 @@ export class TwitchApi implements ICredentialType {
 			url: '/oauth2/validate',
 			method: 'GET',
 			headers: {
-				Authorization: '={{$credentials.oauthToken}}',
+				Authorization: '=Bearer {{$credentials.oauthToken}}',
 			},
 		},
 	};
