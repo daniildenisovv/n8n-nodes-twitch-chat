@@ -6,7 +6,6 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 import * as tmi from 'tmi.js';
-import * as ExcelJS from 'exceljs';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -73,8 +72,8 @@ export class TwitchChat implements INodeType {
 				name: 'outputFilePath',
 				type: 'string',
 				default: '',
-				placeholder: '/path/to/table/messages.xlsx',
-				description: 'Full path to the output XLSX file where messages will be streamed',
+				placeholder: '/path/to/table/messages.csv',
+				description: 'Full path to the output CSV file where messages will be streamed',
 				required: true,
 			},
 			{
@@ -147,6 +146,16 @@ export class TwitchChat implements INodeType {
 					fs.mkdirSync(dir, { recursive: true });
 				}
 
+				// Helper function to escape CSV values
+				const escapeCsvValue = (value: string | number): string => {
+					const strValue = String(value);
+					// If value contains comma, quote, or newline, wrap in quotes and escape internal quotes
+					if (strValue.includes(',') || strValue.includes('"') || strValue.includes('\n')) {
+						return `"${strValue.replace(/"/g, '""')}"`;
+					}
+					return strValue;
+				};
+
 				// Prepare headers
 				const headers = ['Timestamp', 'Channel', 'Username', 'Display Name', 'Message'];
 
@@ -154,57 +163,46 @@ export class TwitchChat implements INodeType {
 					headers.push('User ID', 'User Color', 'Badges', 'Emotes');
 				}
 
-				// Create initial file with headers
-				const workbook = new ExcelJS.Workbook();
-				const worksheet = workbook.addWorksheet('Twitch Chat Messages');
+				// Create CSV file with headers
+				const headerLine = headers.map(escapeCsvValue).join(',') + '\n';
+				fs.writeFileSync(resolvedPath, headerLine, { encoding: 'utf8' });
 
-				// Set column widths
-				worksheet.getColumn(1).width = 25; // Timestamp
-				worksheet.getColumn(2).width = 20; // Channel
-				worksheet.getColumn(3).width = 20; // Username
-				worksheet.getColumn(4).width = 20; // Display Name
-				worksheet.getColumn(5).width = 50; // Message
-
-				if (options.includeUserInfo) {
-					worksheet.getColumn(6).width = 15; // User ID
-					worksheet.getColumn(7).width = 15; // User Color
-					worksheet.getColumn(8).width = 30; // Badges
-					worksheet.getColumn(9).width = 30; // Emotes
-				}
-
-				// Add header row with bold style
-				const headerRow = worksheet.addRow(headers);
-				headerRow.font = { bold: true };
-
-				// Save initial file
-				await workbook.xlsx.writeFile(resolvedPath);
+				// Create write stream for appending messages
+				const writeStream = fs.createWriteStream(resolvedPath, {
+					flags: 'a', // append mode
+					encoding: 'utf8',
+				});
 
 				let isStreamEnded = false;
+				let isWriteStreamClosed = false;
 
 				// Function to append buffered messages to file
 				const flushBuffer = async () => {
-					if (messageBuffer.length === 0) return; // Nothing to save
+					if (messageBuffer.length === 0 || isWriteStreamClosed) return;
 
 					try {
-						// Load existing workbook
-						const wb = new ExcelJS.Workbook();
-						await wb.xlsx.readFile(resolvedPath);
+						// Convert all buffered messages to CSV lines
+						const csvLines =
+							messageBuffer.map((rowData) => rowData.map(escapeCsvValue).join(',')).join('\n') +
+							'\n';
 
-						const ws = wb.getWorksheet('Twitch Chat Messages');
-						if (!ws) {
-							console.error('Worksheet not found');
-							return;
-						}
+						// Write to stream
+						await new Promise<void>((resolve, reject) => {
+							const canWrite = writeStream.write(csvLines, 'utf8', (error) => {
+								if (error) {
+									reject(error);
+								} else {
+									resolve();
+								}
+							});
 
-						// Add all buffered messages
-						for (const rowData of messageBuffer) {
-							ws.addRow(rowData);
-						}
+							// If buffer is full, wait for drain event
+							if (!canWrite) {
+								writeStream.once('drain', resolve);
+							}
+						});
 
-						// Save file
-						await wb.xlsx.writeFile(resolvedPath);
-
-						// Clear buffer after successful save
+						// Clear buffer after successful write
 						messageBuffer.length = 0;
 					} catch (error) {
 						console.error('Error flushing buffer:', error);
@@ -303,6 +301,20 @@ export class TwitchChat implements INodeType {
 
 					// Final flush
 					await flushBuffer();
+
+					// Close write stream and ensure data is written to disk
+					if (!isWriteStreamClosed) {
+						await new Promise<void>((resolve, reject) => {
+							writeStream.end((error?: Error) => {
+								if (error) {
+									reject(error);
+								} else {
+									isWriteStreamClosed = true;
+									resolve();
+								}
+							});
+						});
+					}
 				};
 
 				// Wait for specified duration or until stream ends
