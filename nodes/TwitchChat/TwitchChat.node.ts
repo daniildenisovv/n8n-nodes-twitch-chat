@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import type {
 	IExecuteFunctions,
 	INodeExecutionData,
@@ -5,6 +6,7 @@ import type {
 	INodeTypeDescription,
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import * as path from 'path';
 import * as tmi from 'tmi.js';
 
 interface TwitchMessage {
@@ -17,6 +19,64 @@ interface TwitchMessage {
 	userColor?: string;
 	badges?: tmi.Badges;
 	emotes?: { [emoteid: string]: string[] };
+}
+
+// Функция для создания директории если её нет
+function ensureDirectoryExists(dirPath: string): void {
+	if (!fs.existsSync(dirPath)) {
+		fs.mkdirSync(dirPath, { recursive: true });
+	}
+}
+
+// Функция для создания имени файла для канала
+function createLogFileName(channelName: string, startTime: Date): string {
+	const timestamp = startTime.toISOString().replace(/[:.]/g, '-');
+	return `${channelName}_${timestamp}.csv`;
+}
+
+// Функция для записи заголовка CSV
+function writeCSVHeader(filePath: string, includeUserInfo: boolean): void {
+	let header = 'timestamp,channel,username,displayName,message';
+	if (includeUserInfo) {
+		header += ',userId,userColor,badges,emotes';
+	}
+	header += '\n';
+	fs.writeFileSync(filePath, header, 'utf8');
+}
+
+// Функция для экранирования CSV значений
+function escapeCSV(value: string): string {
+	if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+		return `"${value.replace(/"/g, '""')}"`;
+	}
+	return value;
+}
+
+// Функция для записи сообщения в CSV
+function appendMessageToCSV(
+	filePath: string,
+	message: TwitchMessage,
+	includeUserInfo: boolean,
+): void {
+	const row = [
+		message.timestamp,
+		escapeCSV(message.channel),
+		escapeCSV(message.username),
+		escapeCSV(message.displayName),
+		escapeCSV(message.message),
+	];
+
+	if (includeUserInfo) {
+		row.push(
+			message.userId || '',
+			message.userColor || '',
+			message.badges ? escapeCSV(JSON.stringify(message.badges)) : '',
+			message.emotes ? escapeCSV(JSON.stringify(message.emotes)) : '',
+		);
+	}
+
+	const line = row.join(',') + '\n';
+	fs.appendFileSync(filePath, line, 'utf8');
 }
 
 export class TwitchChat implements INodeType {
@@ -78,6 +138,14 @@ export class TwitchChat implements INodeType {
 				},
 			},
 			{
+				displayName: 'Log Directory',
+				name: 'logDirectory',
+				type: 'string',
+				default: './chat-logs',
+				description: 'Directory path where chat logs will be stored',
+				required: true,
+			},
+			{
 				displayName: 'Options',
 				name: 'options',
 				type: 'collection',
@@ -113,6 +181,11 @@ export class TwitchChat implements INodeType {
 				const channelName = this.getNodeParameter('channelName', itemIndex, '') as string;
 				const durationType = this.getNodeParameter('durationType', itemIndex) as string;
 				const duration = this.getNodeParameter('duration', itemIndex, 60000) as number;
+				const logDirectory = this.getNodeParameter(
+					'logDirectory',
+					itemIndex,
+					'./chat-logs',
+				) as string;
 				const options = this.getNodeParameter('options', itemIndex, {}) as {
 					includeUserInfo?: boolean;
 					debug?: boolean;
@@ -127,7 +200,19 @@ export class TwitchChat implements INodeType {
 					? channelName.substring(1)
 					: channelName;
 
-				const messages: TwitchMessage[] = [];
+				// Создаем директорию для логов
+				const logsPath = path.resolve(logDirectory);
+				ensureDirectoryExists(logsPath);
+
+				// Создаем файл для логов этого канала
+				const sessionStartTime = new Date();
+				const logFileName = createLogFileName(cleanChannelName, sessionStartTime);
+				const logFilePath = path.join(logsPath, logFileName);
+
+				// Записываем заголовок CSV
+				writeCSVHeader(logFilePath, options.includeUserInfo || false);
+
+				let messagesCount = 0;
 				let isStreamEnded = false;
 
 				// Configure TMI client
@@ -170,13 +255,15 @@ export class TwitchChat implements INodeType {
 							messageData.emotes = tags.emotes;
 						}
 
-						messages.push(messageData);
+						// Записываем сообщение в файл
+						appendMessageToCSV(logFilePath, messageData, options.includeUserInfo || false);
+						messagesCount++;
 					},
 				);
 
 				// Monitor for stream end (host mode or stream offline notice)
 				if (durationType === 'untilEnd') {
-					client.on('notice', (channel: string, msgid: string, message: string) => {
+					client.on('notice', (_channel: string, msgid: string, message: string) => {
 						// Twitch sends various notices when stream ends
 						if (
 							msgid === 'host_on' ||
@@ -217,8 +304,11 @@ export class TwitchChat implements INodeType {
 				returnData.push({
 					json: {
 						channel: cleanChannelName,
-						messagesCount: messages.length,
-						messages,
+						messagesCount: messagesCount,
+						logFilePath: logFilePath,
+						logFileName: logFileName,
+						startTime: sessionStartTime.toISOString(),
+						endTime: new Date().toISOString(),
 					},
 					pairedItem: itemIndex,
 				});

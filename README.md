@@ -44,6 +44,7 @@ The Twitch Chat node supports the following operation:
   - Fixed Duration (MS): Monitor for a specific time in milliseconds
   - Until Stream Ends: Monitor until the stream goes offline
 - **Duration (MS)**: Time to monitor in milliseconds (when using Fixed Duration)
+- **Log Directory** (required): Directory path where chat logs will be stored (default: `./chat-logs`)
 - **Options**:
   - Include User Info: Include detailed user information (badges, emotes, color)
   - Debug Mode: Enable debug logging
@@ -87,19 +88,21 @@ The node will return an array of chat messages with timestamps, usernames, and m
 {
 	"channel": "channel_name",
 	"messagesCount": 150,
-	"messages": [
-		{
-			"timestamp": "2025-10-08T10:30:45.123Z",
-			"channel": "#channel_name",
-			"username": "user123",
-			"displayName": "User123",
-			"message": "Hello chat!",
-			"userId": "123456789",
-			"userColor": "#FF0000"
-		}
-	]
+	"logFilePath": "/path/to/chat-logs/channel_name_2025-10-11T10-30-00-000Z.csv",
+	"logFileName": "channel_name_2025-10-11T10-30-00-000Z.csv",
+	"startTime": "2025-10-11T10:30:00.000Z",
+	"endTime": "2025-10-11T10:31:00.000Z"
 }
 ```
+
+Chat messages are saved to CSV files with the following columns:
+
+- `timestamp` - Message timestamp
+- `channel` - Channel name
+- `username` - Username
+- `displayName` - Display name
+- `message` - Message content
+- (Optional) `userId`, `userColor`, `badges`, `emotes` - Additional user information
 
 ### Advanced Usage
 
