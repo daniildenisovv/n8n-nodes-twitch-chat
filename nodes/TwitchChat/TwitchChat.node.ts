@@ -10,18 +10,6 @@ import * as ExcelJS from 'exceljs';
 import * as path from 'path';
 import * as fs from 'fs';
 
-interface ChatRowData {
-	timestamp: string;
-	channel: string;
-	username: string;
-	displayName: string;
-	message: string;
-	userId?: string;
-	userColor?: string;
-	badges?: string;
-	emotes?: string;
-}
-
 export class TwitchChat implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Twitch Chat',
@@ -120,10 +108,9 @@ export class TwitchChat implements INodeType {
 		const returnData: INodeExecutionData[] = [];
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
-			let workbook: ExcelJS.stream.xlsx.WorkbookWriter | null = null;
-			let worksheet: ExcelJS.Worksheet | null = null;
 			let messageCount = 0;
 			let cleanup: (() => Promise<void>) | null = null;
+			const messageBuffer: (string | number)[][] = []; // Буфер для накопления сообщений
 
 			try {
 				const credentials = await this.getCredentials('twitchTMIApi', itemIndex);
@@ -160,39 +147,70 @@ export class TwitchChat implements INodeType {
 					fs.mkdirSync(dir, { recursive: true });
 				}
 
-				// Initialize streaming workbook writer
-				workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-					filename: resolvedPath,
-					useStyles: true,
-					useSharedStrings: true,
-				});
-
-				worksheet = workbook.addWorksheet('Twitch Chat Messages');
-
-				// Define columns based on whether user info is included
-				const columns: Array<{ header: string; key: string; width: number }> = [
-					{ header: 'Timestamp', key: 'timestamp', width: 25 },
-					{ header: 'Channel', key: 'channel', width: 20 },
-					{ header: 'Username', key: 'username', width: 20 },
-					{ header: 'Display Name', key: 'displayName', width: 20 },
-					{ header: 'Message', key: 'message', width: 50 },
-				];
+				// Prepare headers
+				const headers = ['Timestamp', 'Channel', 'Username', 'Display Name', 'Message'];
 
 				if (options.includeUserInfo) {
-					columns.push(
-						{ header: 'User ID', key: 'userId', width: 15 },
-						{ header: 'User Color', key: 'userColor', width: 15 },
-						{ header: 'Badges', key: 'badges', width: 30 },
-						{ header: 'Emotes', key: 'emotes', width: 30 },
-					);
+					headers.push('User ID', 'User Color', 'Badges', 'Emotes');
 				}
 
-				worksheet.columns = columns;
+				// Create initial file with headers
+				const workbook = new ExcelJS.Workbook();
+				const worksheet = workbook.addWorksheet('Twitch Chat Messages');
 
-				// Commit the header row
-				worksheet.getRow(1).commit();
+				// Set column widths
+				worksheet.getColumn(1).width = 25; // Timestamp
+				worksheet.getColumn(2).width = 20; // Channel
+				worksheet.getColumn(3).width = 20; // Username
+				worksheet.getColumn(4).width = 20; // Display Name
+				worksheet.getColumn(5).width = 50; // Message
+
+				if (options.includeUserInfo) {
+					worksheet.getColumn(6).width = 15; // User ID
+					worksheet.getColumn(7).width = 15; // User Color
+					worksheet.getColumn(8).width = 30; // Badges
+					worksheet.getColumn(9).width = 30; // Emotes
+				}
+
+				// Add header row with bold style
+				const headerRow = worksheet.addRow(headers);
+				headerRow.font = { bold: true };
+
+				// Save initial file
+				await workbook.xlsx.writeFile(resolvedPath);
 
 				let isStreamEnded = false;
+
+				// Function to append buffered messages to file
+				const flushBuffer = async () => {
+					if (messageBuffer.length === 0) return; // Nothing to save
+
+					try {
+						// Load existing workbook
+						const wb = new ExcelJS.Workbook();
+						await wb.xlsx.readFile(resolvedPath);
+
+						const ws = wb.getWorksheet('Twitch Chat Messages');
+						if (!ws) {
+							console.error('Worksheet not found');
+							return;
+						}
+
+						// Add all buffered messages
+						for (const rowData of messageBuffer) {
+							ws.addRow(rowData);
+						}
+
+						// Save file
+						await wb.xlsx.writeFile(resolvedPath);
+
+						// Clear buffer after successful save
+						messageBuffer.length = 0;
+					} catch (error) {
+						console.error('Error flushing buffer:', error);
+						// Don't clear buffer on error - will retry next time
+					}
+				};
 
 				// Configure TMI client
 				const opts: tmi.Options = {
@@ -213,30 +231,32 @@ export class TwitchChat implements INodeType {
 
 				const client = new tmi.Client(opts);
 
-				// Set up message handler with streaming write
+				// Set up message handler - just add to buffer
 				client.on(
 					'message',
 					(channel: string, tags: tmi.ChatUserstate, message: string, self: boolean) => {
-						if (self || !worksheet) return;
+						if (self) return;
 
-						const rowData: ChatRowData = {
-							timestamp: new Date().toISOString(),
+						// Build row data as array matching header order
+						const rowData: (string | number)[] = [
+							new Date().toISOString(),
 							channel,
-							username: tags.username || 'unknown',
-							displayName: tags['display-name'] || tags.username || 'unknown',
+							tags.username || 'unknown',
+							tags['display-name'] || tags.username || 'unknown',
 							message,
-						};
+						];
 
 						if (options.includeUserInfo) {
-							rowData.userId = tags['user-id'] || '';
-							rowData.userColor = tags.color || '';
-							rowData.badges = tags.badges ? JSON.stringify(tags.badges) : '';
-							rowData.emotes = tags.emotes ? JSON.stringify(tags.emotes) : '';
+							rowData.push(
+								tags['user-id'] || '',
+								tags.color || '',
+								tags.badges ? JSON.stringify(tags.badges) : '',
+								tags.emotes ? JSON.stringify(tags.emotes) : '',
+							);
 						}
 
-						// Add row and immediately commit to stream
-						const row = worksheet.addRow(rowData);
-						row.commit();
+						// Add to buffer (not to file yet)
+						messageBuffer.push(rowData);
 						messageCount++;
 					},
 				);
@@ -259,11 +279,21 @@ export class TwitchChat implements INodeType {
 				// Connect to Twitch
 				await client.connect();
 
+				// Flush buffer every 5 seconds
+				const saveInterval = setInterval(() => {
+					flushBuffer().catch((error) => {
+						console.error('Error in periodic flush:', error);
+					});
+				}, 5000);
+
 				// Setup cleanup handler
 				let isCleaningUp = false;
 				cleanup = async () => {
 					if (isCleaningUp) return;
 					isCleaningUp = true;
+
+					// Clear save interval
+					clearInterval(saveInterval);
 
 					try {
 						await client.disconnect();
@@ -271,13 +301,8 @@ export class TwitchChat implements INodeType {
 						// Ignore disconnect errors
 					}
 
-					// Finalize the workbook (commit all pending data)
-					if (worksheet) {
-						worksheet.commit();
-					}
-					if (workbook) {
-						await workbook.commit();
-					}
+					// Final flush
+					await flushBuffer();
 				};
 
 				// Wait for specified duration or until stream ends
@@ -314,7 +339,7 @@ export class TwitchChat implements INodeType {
 					pairedItem: itemIndex,
 				});
 			} catch (error) {
-				// Clean up workbook on error
+				// Clean up on error
 				if (cleanup) {
 					try {
 						await cleanup();
