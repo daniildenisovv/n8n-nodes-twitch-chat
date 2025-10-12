@@ -6,8 +6,11 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 import * as tmi from 'tmi.js';
+import * as ExcelJS from 'exceljs';
+import * as path from 'path';
+import * as fs from 'fs';
 
-interface TwitchMessage {
+interface ChatRowData {
 	timestamp: string;
 	channel: string;
 	username: string;
@@ -15,8 +18,8 @@ interface TwitchMessage {
 	message: string;
 	userId?: string;
 	userColor?: string;
-	badges?: tmi.Badges;
-	emotes?: { [emoteid: string]: string[] };
+	badges?: string;
+	emotes?: string;
 }
 
 export class TwitchChat implements INodeType {
@@ -78,6 +81,15 @@ export class TwitchChat implements INodeType {
 				},
 			},
 			{
+				displayName: 'Output File Path',
+				name: 'outputFilePath',
+				type: 'string',
+				default: '',
+				placeholder: '/path/to/table/messages.xlsx',
+				description: 'Full path to the output XLSX file where messages will be streamed',
+				required: true,
+			},
+			{
 				displayName: 'Options',
 				name: 'options',
 				type: 'collection',
@@ -108,11 +120,17 @@ export class TwitchChat implements INodeType {
 		const returnData: INodeExecutionData[] = [];
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+			let workbook: ExcelJS.stream.xlsx.WorkbookWriter | null = null;
+			let worksheet: ExcelJS.Worksheet | null = null;
+			let messageCount = 0;
+			let cleanup: (() => Promise<void>) | null = null;
+
 			try {
 				const credentials = await this.getCredentials('twitchTMIApi', itemIndex);
 				const channelName = this.getNodeParameter('channelName', itemIndex, '') as string;
 				const durationType = this.getNodeParameter('durationType', itemIndex) as string;
 				const duration = this.getNodeParameter('duration', itemIndex, 60000) as number;
+				const outputFilePath = this.getNodeParameter('outputFilePath', itemIndex, '') as string;
 				const options = this.getNodeParameter('options', itemIndex, {}) as {
 					includeUserInfo?: boolean;
 					debug?: boolean;
@@ -122,12 +140,58 @@ export class TwitchChat implements INodeType {
 					throw new NodeOperationError(this.getNode(), 'Channel name is required', { itemIndex });
 				}
 
+				if (!outputFilePath) {
+					throw new NodeOperationError(this.getNode(), 'Output file path is required', {
+						itemIndex,
+					});
+				}
+
 				// Clean channel name (remove # if present)
 				const cleanChannelName = channelName.startsWith('#')
 					? channelName.substring(1)
 					: channelName;
 
-				const messages: TwitchMessage[] = [];
+				// Validate and prepare file path
+				const resolvedPath = path.resolve(outputFilePath);
+				const dir = path.dirname(resolvedPath);
+
+				// Create directory if it doesn't exist
+				if (!fs.existsSync(dir)) {
+					fs.mkdirSync(dir, { recursive: true });
+				}
+
+				// Initialize streaming workbook writer
+				workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+					filename: resolvedPath,
+					useStyles: true,
+					useSharedStrings: true,
+				});
+
+				worksheet = workbook.addWorksheet('Twitch Chat Messages');
+
+				// Define columns based on whether user info is included
+				const columns: Array<{ header: string; key: string; width: number }> = [
+					{ header: 'Timestamp', key: 'timestamp', width: 25 },
+					{ header: 'Channel', key: 'channel', width: 20 },
+					{ header: 'Username', key: 'username', width: 20 },
+					{ header: 'Display Name', key: 'displayName', width: 20 },
+					{ header: 'Message', key: 'message', width: 50 },
+				];
+
+				if (options.includeUserInfo) {
+					columns.push(
+						{ header: 'User ID', key: 'userId', width: 15 },
+						{ header: 'User Color', key: 'userColor', width: 15 },
+						{ header: 'Badges', key: 'badges', width: 30 },
+						{ header: 'Emotes', key: 'emotes', width: 30 },
+					);
+				}
+
+				worksheet.columns = columns;
+
+				// Commit the header row
+				worksheet.getRow(1).commit();
+
 				let isStreamEnded = false;
 
 				// Configure TMI client
@@ -149,13 +213,13 @@ export class TwitchChat implements INodeType {
 
 				const client = new tmi.Client(opts);
 
-				// Set up message handler
+				// Set up message handler with streaming write
 				client.on(
 					'message',
 					(channel: string, tags: tmi.ChatUserstate, message: string, self: boolean) => {
-						if (self) return;
+						if (self || !worksheet) return;
 
-						const messageData: TwitchMessage = {
+						const rowData: ChatRowData = {
 							timestamp: new Date().toISOString(),
 							channel,
 							username: tags.username || 'unknown',
@@ -164,13 +228,16 @@ export class TwitchChat implements INodeType {
 						};
 
 						if (options.includeUserInfo) {
-							messageData.userId = tags['user-id'];
-							messageData.userColor = tags.color;
-							messageData.badges = tags.badges;
-							messageData.emotes = tags.emotes;
+							rowData.userId = tags['user-id'] || '';
+							rowData.userColor = tags.color || '';
+							rowData.badges = tags.badges ? JSON.stringify(tags.badges) : '';
+							rowData.emotes = tags.emotes ? JSON.stringify(tags.emotes) : '';
 						}
 
-						messages.push(messageData);
+						// Add row and immediately commit to stream
+						const row = worksheet.addRow(rowData);
+						row.commit();
+						messageCount++;
 					},
 				);
 
@@ -192,37 +259,70 @@ export class TwitchChat implements INodeType {
 				// Connect to Twitch
 				await client.connect();
 
+				// Setup cleanup handler
+				let isCleaningUp = false;
+				cleanup = async () => {
+					if (isCleaningUp) return;
+					isCleaningUp = true;
+
+					try {
+						await client.disconnect();
+					} catch {
+						// Ignore disconnect errors
+					}
+
+					// Finalize the workbook (commit all pending data)
+					if (worksheet) {
+						worksheet.commit();
+					}
+					if (workbook) {
+						await workbook.commit();
+					}
+				};
+
 				// Wait for specified duration or until stream ends
 				const startTime = Date.now();
 				const maxDuration = durationType === 'duration' ? duration : Infinity;
 
-				await new Promise<void>((resolve) => {
-					const checkInterval = setInterval(() => {
-						const elapsed = Date.now() - startTime;
+				try {
+					await new Promise<void>((resolve) => {
+						const checkInterval = setInterval(() => {
+							const elapsed = Date.now() - startTime;
 
-						if (durationType === 'untilEnd' && isStreamEnded) {
-							clearInterval(checkInterval);
-							resolve();
-						} else if (durationType === 'duration' && elapsed >= maxDuration) {
-							clearInterval(checkInterval);
-							resolve();
-						}
-					}, 1000); // Check every second
-				});
+							if (durationType === 'untilEnd' && isStreamEnded) {
+								clearInterval(checkInterval);
+								resolve();
+							} else if (durationType === 'duration' && elapsed >= maxDuration) {
+								clearInterval(checkInterval);
+								resolve();
+							}
+						}, 1000); // Check every second
+					});
+				} finally {
+					// Always cleanup on exit (normal or error)
+					await cleanup();
+				}
 
-				// Disconnect from Twitch
-				await client.disconnect();
-
-				// Return messages
+				// Return result with file info instead of messages
 				returnData.push({
 					json: {
 						channel: cleanChannelName,
-						messagesCount: messages.length,
-						messages,
+						messagesCount: messageCount,
+						outputFile: resolvedPath,
+						status: 'success',
 					},
 					pairedItem: itemIndex,
 				});
 			} catch (error) {
+				// Clean up workbook on error
+				if (cleanup) {
+					try {
+						await cleanup();
+					} catch {
+						// Ignore cleanup errors
+					}
+				}
+
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: {

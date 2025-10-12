@@ -35,7 +35,7 @@ npm install n8n-nodes-twitch-chat
 
 The Twitch Chat node supports the following operation:
 
-- **Read Chat Messages**: Monitor a Twitch channel's chat and collect messages for a specified duration or until the stream ends
+- **Read Chat Messages**: Monitor a Twitch channel's chat and stream messages directly to an XLSX file for a specified duration or until the stream ends
 
 ### Parameters
 
@@ -44,9 +44,19 @@ The Twitch Chat node supports the following operation:
   - Fixed Duration (MS): Monitor for a specific time in milliseconds
   - Until Stream Ends: Monitor until the stream goes offline
 - **Duration (MS)**: Time to monitor in milliseconds (when using Fixed Duration)
+- **Output File Path** (required): Full path to the output XLSX file (e.g., `/path/to/table/messages.xlsx`). Directory will be created if it doesn't exist.
 - **Options**:
   - Include User Info: Include detailed user information (badges, emotes, color)
   - Debug Mode: Enable debug logging
+
+### Performance Optimizations
+
+This node uses **streaming write** to XLSX files, which means:
+
+- Messages are written directly to disk as they arrive
+- No accumulation of messages in memory
+- Suitable for high-volume chat streams (thousands of messages)
+- Low memory footprint regardless of stream duration
 
 ## Credentials
 
@@ -77,29 +87,35 @@ To use this node, you need to set up Twitch API credentials:
 2. Configure credentials
 3. Enter a channel name (e.g., `xqc`, `shroud`)
 4. Set duration (e.g., 60000 for 1 minute)
-5. Run the workflow
+5. Specify output file path (e.g., `/tmp/twitch_chat/messages.xlsx`)
+6. Run the workflow
 
-The node will return an array of chat messages with timestamps, usernames, and message content.
+The node will stream chat messages directly to the specified XLSX file.
 
 ### Output Format
+
+The node returns metadata about the operation:
 
 ```json
 {
 	"channel": "channel_name",
-	"messagesCount": 150,
-	"messages": [
-		{
-			"timestamp": "2025-10-08T10:30:45.123Z",
-			"channel": "#channel_name",
-			"username": "user123",
-			"displayName": "User123",
-			"message": "Hello chat!",
-			"userId": "123456789",
-			"userColor": "#FF0000"
-		}
-	]
+	"messagesCount": 1543,
+	"outputFile": "/tmp/twitch_chat/messages.xlsx",
+	"status": "success"
 }
 ```
+
+The XLSX file will contain the following columns:
+
+- **Timestamp**: ISO 8601 timestamp of when the message was received
+- **Channel**: The Twitch channel name
+- **Username**: The user's username
+- **Display Name**: The user's display name
+- **Message**: The chat message content
+- **User ID** (if Include User Info is enabled)
+- **User Color** (if Include User Info is enabled)
+- **Badges** (if Include User Info is enabled, JSON string)
+- **Emotes** (if Include User Info is enabled, JSON string)
 
 ### Advanced Usage
 
@@ -113,6 +129,15 @@ See [TWITCH_NODE_USAGE.md](./TWITCH_NODE_USAGE.md) for detailed usage examples a
 - [Twitch Chat OAuth Generator](https://twitchapps.com/tmi/)
 
 ## Version history
+
+### 0.2.0
+
+- **BREAKING CHANGE**: Messages are now streamed directly to XLSX files instead of being returned in memory
+- Added required `Output File Path` parameter for specifying XLSX output location
+- Memory optimization: No message accumulation in RAM
+- Suitable for high-volume, long-duration chat monitoring
+- Automatic directory creation for output files
+- Excel file includes formatted columns with proper widths
 
 ### 0.1.0
 

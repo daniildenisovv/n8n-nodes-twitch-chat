@@ -1,7 +1,7 @@
 {
 	"name": "n8n-nodes-twitch-chat",
-	"version": "0.1.0",
-	"description": "n8n community node to read Twitch chat messages",
+	"version": "0.2.0",
+	"description": "n8n community node to stream Twitch chat messages to XLSX files",
 	"license": "MIT",
 	"homepage": "https://github.com/archyCuber/n8n-nodes-twitch-chat",
 	"keywords": [
@@ -42,11 +42,12 @@
 		]
 	},
 	"dependencies": {
+		"exceljs": "^4.4.0",
 		"tmi.js": "^1.8.5"
 	},
 	"devDependencies": {
 		"@n8n/node-cli": "*",
-		"@types/node": "^20.0.0",
+		"@types/node": "^20.19.21",
 		"@types/tmi.js": "^1.8.6",
 		"eslint": "9.32.0",
 		"prettier": "3.6.2",
